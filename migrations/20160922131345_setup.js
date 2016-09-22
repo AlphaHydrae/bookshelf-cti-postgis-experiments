@@ -27,6 +27,7 @@ exports.down = function(knex, Promise) {
 function createThingsTable(knex) {
   return knex.schema.createTable('things', function(t) {
     t.bigIncrements('id').primary();
+    t.enum('thing_table', [ 'gardens', 'street_lights', 'traffic_signs' ]);
     t.string('name').notNull();
   });
 }

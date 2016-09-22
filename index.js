@@ -15,20 +15,22 @@ bookshelf.plugin('virtuals');
 var Thing = bookshelf.model('Thing', {
   tableName: 'things',
 
+  virtuals: {
+    type: function() {
+      return this.get('thing_table');
+    },
+
+    geom: function() {
+      return this.related('garden').get('geom') || this.related('singlePoint').get('geom');
+    },
+
+    message: function() {
+      return this.related('trafficSign').get('message');
+    }
+  },
+
   serialize: function() {
-
-    var id = this.get('id'),
-        base = bookshelf.Model.prototype.serialize.apply(this, arguments);
-
-    _.each([ 'singlePoint', 'streetLight', 'trafficSign', 'garden' ], function(attr) {
-      if (_.isObject(base[attr]) && base[attr].id != id) {
-        delete base[attr];
-      } else if (_.isObject(base[attr]) && base[attr].id == id) {
-        base.type = attr;
-      }
-    });
-
-    return base;
+    return _.omit(bookshelf.Model.prototype.serialize.apply(this, arguments), 'thing_table', 'singlePoint', 'streetLight', 'trafficSign', 'garden');
   },
 
   singlePoint: function() {
@@ -50,6 +52,16 @@ var Thing = bookshelf.model('Thing', {
 
 var SinglePoint = bookshelf.model('SinglePoint', {
   tableName: 'single_points',
+
+  parse: function(attrs) {
+
+    var base = bookshelf.Model.prototype.parse.apply(this, arguments);
+    if (base && _.isString(base.geom)) {
+      base.geom = JSON.parse(base.geom);
+    }
+
+    return base;
+  },
 
   serialize: function() {
 
@@ -85,6 +97,16 @@ var TrafficSign = bookshelf.model('TrafficSign', {
 var Garden = bookshelf.model('Garden', {
   tableName: 'gardens',
 
+  parse: function(attrs) {
+
+    var base = bookshelf.Model.prototype.parse.apply(this, arguments);
+    if (base && _.isString(base.geom)) {
+      base.geom = JSON.parse(base.geom);
+    }
+
+    return base;
+  },
+
   serialize: function() {
 
     var base = bookshelf.Model.prototype.serialize.apply(this, arguments);
@@ -114,57 +136,101 @@ Promise.resolve()
   .then(_.partial(createTrafficSign, 'Sign 2', 'BOOM', 2, 4))
   .then(_.partial(createGarden, 'Green', [ '2 2', '2 3', '3 3', '3 2', '2 2' ]))
   .then(fetchAll)
+  .then(fetchArea)
   .catch(function(err) {
     console.warn(err.stack);
   })
-  .then(knex.destroy);
+  .then(function() {
+    return knex.destroy();
+  });
 
 function wipe() {
   return knex('things').delete();
 }
 
+function columnAsGeoJson(name) {
+  return function(qb) {
+    qb.select('*', st.asGeoJSON(name));
+  };
+}
+
+function eagerLoad(records) {
+
+  var load = {};
+
+  var types = _.uniq(records.map(function(record) {
+    return record.get('type');
+  }));
+
+  var hasGardens = _.includes(types, 'gardens'),
+      hasStreetLights = _.includes(types, 'street_lights'),
+      hasTrafficSigns = _.includes(types, 'traffic_signs');
+
+  if (hasGardens) {
+    load.garden = columnAsGeoJson('geom');
+  }
+
+  if (hasStreetLights || hasTrafficSigns) {
+    load.singlePoint = columnAsGeoJson('geom');
+
+    if (hasStreetLights) {
+      load.streetLight = _.noop;
+    }
+
+    if (hasTrafficSigns) {
+      load.trafficSign = _.noop;
+    }
+  }
+
+  return load;
+}
+
+function fetchAll() {
+  return Thing.fetchAll().then(function(things) {
+
+    return things.load(eagerLoad(things)).then(function(result) {
+      result.each(function(record) {
+        console.log(JSON.stringify(record.toJSON()));
+      });
+      console.log();
+    });
+  });
+}
+
+function fetchArea() {
+
+  return Thing.collection().query(function(qb) {
+    qb
+      .leftOuterJoin('gardens', 'things.id', 'gardens.id')
+      .leftOuterJoin('single_points', 'things.id', 'single_points.id')
+      .whereRaw("ST_Intersects(coalesce(single_points.geom, gardens.geom), ST_GeomFromText('POLYGON((1 1,1 2,2 2,2 1,1 1))', 4326))");
+  }).fetch().then(function(things) {
+    return things.load(eagerLoad(things)).then(function() {
+      return things.each(function(thing) {
+        console.log(JSON.stringify(thing.toJSON()));
+      });
+    });
+  });
+}
+
 function createGarden(name, polygon) {
   return Promise.resolve()
-    .then(_.partial(_createThing, name))
+    .then(_.partial(_createThing, 'gardens', name))
     .then(_.partial(_createGarden, _, polygon));
 }
 
 function createStreetLight(name, lng, lat) {
   return Promise.resolve()
-    .then(_.partial(_createThing, name))
+    .then(_.partial(_createThing, 'street_lights', name))
     .then(_.partial(_createSinglePoint, _, lng, lat))
     .then(_createStreetLight);
 }
 
 function createTrafficSign(name, message, lng, lat) {
   return Promise.resolve()
-    .then(_.partial(_createThing, name))
+    .then(_.partial(_createThing, 'traffic_signs', name))
     .then(_.partial(_createSinglePoint, _, lng, lat))
     .then(_.partial(_createTrafficSign, _, message));
-}
-
-function fetchAll() {
-  return Thing.fetchAll().then(function(things) {
-
-    function columnAsGeoJson(name) {
-      return function(qb) {
-        qb.select('*', st.asGeoJSON(name));
-      };
-    }
-
-    var eagerLoad = {
-      singlePoint: columnAsGeoJson('geom'),
-      streetLight: _.noop,
-      trafficSign: _.noop,
-      garden: columnAsGeoJson('geom')
-    };
-
-    return things.load(eagerLoad).then(function(result) {
-      result.each(function(record) {
-        console.log(JSON.stringify(record.serialize()));
-      });
-    });
-  });
 }
 
 function _createGarden(thing, polygon) {
@@ -194,6 +260,6 @@ function _createSinglePoint(thing, lng, lat) {
   }).save({}, { method: 'insert' });
 }
 
-function _createThing(name) {
-  return new Thing({ name: name }).save();
+function _createThing(type, name) {
+  return new Thing({ thing_table: type, name: name }).save();
 }
