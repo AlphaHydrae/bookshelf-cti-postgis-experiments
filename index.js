@@ -1,40 +1,55 @@
 var _ = require('lodash'),
-    Promise = require('bluebird');
+    chalk = require('chalk'),
+    Promise = require('bluebird'),
+    wellKnown = require('wellknown');
 
 var knex = require('knex')({
   client: 'postgresql',
   connection: 'postgres://localhost/bookshelf-cti-postgis-experiments'
 });
 
+knex.on('query', logKnexQueries);
+
 var st = require('knex-postgis')(knex);
 
 var bookshelf = require('bookshelf')(knex);
 bookshelf.plugin('registry');
 bookshelf.plugin('virtuals');
+bookshelf.plugin(ctiPlugin);
+bookshelf.plugin(gisPlugin);
+
+// Domain model
+// ------------
 
 var Thing = bookshelf.model('Thing', {
   tableName: 'things',
 
+  cti: {
+    children: {
+      garden: 'Garden',
+      singlePoint: 'SinglePoint'
+    },
+
+    delegate: {
+      geom: [ 'garden', 'singlePoint' ],
+      message: 'trafficSign'
+    }
+  },
+
   virtuals: {
-    type: function() {
-      return this.get('thing_table');
-    },
+    type: {
+      get: function() {
+        return this.get('thing_table');
+      },
 
-    geom: function() {
-      return this.related('garden').get('geom') || this.related('singlePoint').get('geom');
-    },
-
-    message: function() {
-      return this.related('trafficSign').get('message');
+      set: function(table) {
+        return this.set('thing_table', table);
+      }
     }
   },
 
   serialize: function() {
-    return _.omit(bookshelf.Model.prototype.serialize.apply(this, arguments), 'thing_table', 'singlePoint', 'streetLight', 'trafficSign', 'garden');
-  },
-
-  singlePoint: function() {
-    return this.hasOne('SinglePoint', 'id');
+    return _.omit(bookshelf.Model.prototype.serialize.apply(this, arguments), 'thing_table', 'streetLight', 'trafficSign');
   },
 
   streetLight: function() {
@@ -43,98 +58,97 @@ var Thing = bookshelf.model('Thing', {
 
   trafficSign: function() {
     return this.hasOne('TrafficSign', 'id').through('SinglePoint', 'id', 'id')
-  },
-
-  garden: function() {
-    return this.hasOne('Garden', 'id');
   }
 });
 
 var SinglePoint = bookshelf.model('SinglePoint', {
   tableName: 'single_points',
 
-  parse: function(attrs) {
-
-    var base = bookshelf.Model.prototype.parse.apply(this, arguments);
-    if (base && _.isString(base.geom)) {
-      base.geom = JSON.parse(base.geom);
+  cti: {
+    parent: { target: 'thing', model: 'Thing' },
+    delegate: {
+      name: 'thing'
     }
-
-    return base;
   },
 
-  serialize: function() {
-
-    var base = bookshelf.Model.prototype.serialize.apply(this, arguments);
-    if (_.isString(base.geom)) {
-      base.geom = JSON.parse(base.geom);
-    }
-
-    return base;
-  },
-
-  thing: function() {
-    return this.belongsTo('Thing');
-  }
+  geoAttributes: [ 'geom' ]
 });
 
 var StreetLight = bookshelf.model('StreetLight', {
   tableName: 'street_lights',
 
-  singlePoint: function() {
-    return this.belongsTo('SinglePoint');
+  cti: {
+    concrete: true,
+    parent: { target: 'singlePoint', model: 'SinglePoint' },
+    delegate: {
+      name: 'singlePoint',
+      geom: 'singlePoint'
+    }
   }
 });
 
 var TrafficSign = bookshelf.model('TrafficSign', {
   tableName: 'traffic_signs',
 
-  singlePoint: function() {
-    return this.belongsTo('SinglePoint');
+  cti: {
+    concrete: true,
+    parent: { target: 'singlePoint', model: 'SinglePoint' },
+    delegate: {
+      name: 'singlePoint',
+      geom: 'singlePoint'
+    }
   }
 });
 
 var Garden = bookshelf.model('Garden', {
   tableName: 'gardens',
 
-  parse: function(attrs) {
-
-    var base = bookshelf.Model.prototype.parse.apply(this, arguments);
-    if (base && _.isString(base.geom)) {
-      base.geom = JSON.parse(base.geom);
+  cti: {
+    concrete: true,
+    parent: { target: 'thing', model: 'Thing' },
+    delegate: {
+      name: 'thing'
     }
-
-    return base;
   },
 
-  serialize: function() {
-
-    var base = bookshelf.Model.prototype.serialize.apply(this, arguments);
-    if (_.isString(base.geom)) {
-      base.geom = JSON.parse(base.geom);
-    }
-
-    return base;
-  },
-
-  thing: function() {
-    return this.belongsTo('Thing');
-  }
+  geoAttributes: [ 'geom' ]
 });
 
-knex.on('query', function(query) {
-  console.log(query.sql + ' with bindings ' + JSON.stringify(query.bindings));
-  console.log();
-});
+// Demo
+// ----
+
+var thingsToCreate = [
+  new StreetLight({
+    name: 'Light 1',
+    geom: { type: 'Point', coordinates: [ 0, 0 ] }
+  }),
+  new StreetLight({
+    name: 'Light 2',
+    geom: { type: 'Point', coordinates: [ 1, 0 ] }
+  }),
+  new StreetLight({
+    name: 'Light 3',
+    geom: { type: 'Point', coordinates: [ 0, 1 ] }
+  }),
+  new TrafficSign({
+    name: 'Sign 1',
+    message: 'STOP',
+    geom: { type: 'Point', coordinates: [ 2, 2 ] }
+  }),
+  new TrafficSign({
+    name: 'Sign 2',
+    message: 'SLOW',
+    geom: { type: 'Point', coordinates: [ 2, 4 ] }
+  }),
+  new Garden({
+    name: 'Green Garden',
+    geom: { type: 'Polygon', coordinates: [ [ [ 2, 2 ], [ 2, 3 ], [ 3, 3 ], [ 3, 2 ], [ 2, 2 ] ] ] }
+  })
+];
 
 Promise.resolve()
-  .then(wipe)
-  .then(_.partial(createStreetLight, 'Light 1', 0, 0))
-  .then(_.partial(createStreetLight, 'Light 2', 1, 0))
-  .then(_.partial(createStreetLight, 'Light 3', 0, 1))
-  .then(_.partial(createTrafficSign, 'Sign 1', 'STOP', 2, 2))
-  .then(_.partial(createTrafficSign, 'Sign 2', 'BOOM', 2, 4))
-  .then(_.partial(createGarden, 'Green', [ '2 2', '2 3', '3 3', '3 2', '2 2' ]))
+  .then(clearData)
+  .then(createThings)
   .then(fetchAll)
   .then(fetchArea)
   .catch(function(err) {
@@ -144,14 +158,53 @@ Promise.resolve()
     return knex.destroy();
   });
 
-function wipe() {
+function clearData() {
+  console.log(chalk.bold('Clearing all data'));
   return knex('things').delete();
 }
+
+function createThings() {
+  return _.reduce(thingsToCreate, function(memo, thingToCreate) {
+    return memo
+      .return(chalk.bold('\nCreating ' + thingToCreate.get('name')))
+      .then(_.bind(console.log, console))
+      .return()
+      .then(_.bind(thingToCreate.save, thingToCreate));
+  }, Promise.resolve());
+}
+
+function fetchAll() {
+  console.log(chalk.bold('\nFetching all things'));
+
+  return Thing.fetchAll().then(function(things) {
+    return things.load(eagerLoad(things)).then(logCollection);
+  });
+}
+
+function fetchArea() {
+  console.log(chalk.bold('\nFetching things in polygon'));
+
+  return Thing.collection().query(function(qb) {
+    qb
+      .leftOuterJoin('gardens', 'things.id', 'gardens.id')
+      .leftOuterJoin('single_points', 'things.id', 'single_points.id')
+      .whereRaw("ST_Intersects(coalesce(single_points.geom, gardens.geom), ST_GeomFromText('POLYGON((1 1,1 2,2 2,2 1,1 1))', 4326))");
+  }).fetch().then(function(things) {
+    return things.load(eagerLoad(things)).then(logCollection);
+  });
+}
+
+// Utility functions
+// -----------------
 
 function columnAsGeoJson(name) {
   return function(qb) {
     qb.select('*', st.asGeoJSON(name));
   };
+}
+
+function logKnexQueries(query) {
+  console.log(chalk.cyan(query.sql + ' with bindings ' + JSON.stringify(query.bindings)));
 }
 
 function eagerLoad(records) {
@@ -185,81 +238,189 @@ function eagerLoad(records) {
   return load;
 }
 
-function fetchAll() {
-  return Thing.fetchAll().then(function(things) {
-
-    return things.load(eagerLoad(things)).then(function(result) {
-      result.each(function(record) {
-        console.log(JSON.stringify(record.toJSON()));
-      });
-      console.log();
-    });
+function logCollection(collection) {
+  collection.each(function(record) {
+    console.log(chalk.yellow(JSON.stringify(record.toJSON())));
   });
 }
 
-function fetchArea() {
+// Plugins
+// -------
 
-  return Thing.collection().query(function(qb) {
-    qb
-      .leftOuterJoin('gardens', 'things.id', 'gardens.id')
-      .leftOuterJoin('single_points', 'things.id', 'single_points.id')
-      .whereRaw("ST_Intersects(coalesce(single_points.geom, gardens.geom), ST_GeomFromText('POLYGON((1 1,1 2,2 2,2 1,1 1))', 4326))");
-  }).fetch().then(function(things) {
-    return things.load(eagerLoad(things)).then(function() {
-      return things.each(function(thing) {
-        console.log(JSON.stringify(thing.toJSON()));
+function gisPlugin(bookshelf) {
+
+  var proto = bookshelf.Model.prototype;
+
+  bookshelf.Model = bookshelf.Model.extend({
+    format: function(attrs) {
+
+      var base = proto.format.apply(this, arguments);
+      if (!base) {
+        return base;
+      }
+
+      var geoAttrs = this.geoAttributes || [];
+      _.each(this.geoAttributes || [], function(attr) {
+        if (_.isObject(base[attr])) {
+          base[attr] = wellKnown.stringify(base[attr]);
+        }
       });
-    });
+
+      return base;
+    },
+
+    parse: function(attrs) {
+
+      var base = proto.parse.apply(this, arguments);
+      if (!base) {
+        return base;
+      }
+
+      var geoAttrs = this.geoAttributes || [];
+      _.each(this.geoAttributes || [], function(attr) {
+        if (_.isString(base[attr])) {
+          base[attr] = JSON.parse(base[attr]);
+        }
+      });
+
+      return base;
+    }
   });
 }
 
-function createGarden(name, polygon) {
-  return Promise.resolve()
-    .then(_.partial(_createThing, 'gardens', name))
-    .then(_.partial(_createGarden, _, polygon));
-}
+function ctiPlugin(bookshelf) {
 
-function createStreetLight(name, lng, lat) {
-  return Promise.resolve()
-    .then(_.partial(_createThing, 'street_lights', name))
-    .then(_.partial(_createSinglePoint, _, lng, lat))
-    .then(_createStreetLight);
-}
+  var proto = bookshelf.Model.prototype;
 
-function createTrafficSign(name, message, lng, lat) {
-  return Promise.resolve()
-    .then(_.partial(_createThing, 'traffic_signs', name))
-    .then(_.partial(_createSinglePoint, _, lng, lat))
-    .then(_.partial(_createTrafficSign, _, message));
-}
+  bookshelf.Model = bookshelf.Model.extend({
+    initialize: function(attrs) {
 
-function _createGarden(thing, polygon) {
-  return new Garden({
-    id: thing.attributes.id,
-    geom: st.geomFromText('POLYGON((' + polygon.join(', ') + '))', 4326)
-  }).save({}, { method: 'insert' });
-}
+      proto.initialize.apply(this, arguments);
+      if (!_.isObject(this.cti)) {
+        return;
+      }
 
-function _createStreetLight(singlePoint) {
-  return new StreetLight({
-    id: singlePoint.attributes.id
-  }).save({}, { method: 'insert' });
-}
+      var type = this.cti.type || this.tableName,
+          typeAttr = this.cti.typeAttribute || 'type',
+          isConcrete = this.cti.concrete,
+          parentModel = this.cti.parent,
+          chilModels = this.cti.children;
 
-function _createTrafficSign(singlePoint, message) {
-  return new TrafficSign({
-    id: singlePoint.attributes.id,
-    message: message
-  }).save({}, { method: 'insert' });
-}
+      // set virtuals
+      var set = _.bind(this.set, this);
+      _.each(this.virtuals, function(value, key) {
+        if (_.has(attrs, key)) {
+          set(key, attrs[key]);
+        }
+      });
 
-function _createSinglePoint(thing, lng, lat) {
-  return new SinglePoint({
-    id: thing.attributes.id,
-    geom: st.geomFromText('POINT(' + lng + ' ' + lat + ')', 4326)
-  }).save({}, { method: 'insert' });
-}
+      // set parent type
+      if (isConcrete) {
+        this.set(typeAttr, type);
+      }
 
-function _createThing(type, name) {
-  return new Thing({ thing_table: type, name: name }).save();
+      // create parent
+      this.on('creating', this._ctiCreateParent, this);
+    },
+
+    serialize: function() {
+
+      var base = proto.serialize.apply(this, arguments);
+      if (this.cti.children) {
+        _.each(this.cti.children, function(model, target) {
+          delete base[target];
+        });
+      }
+
+      return base;
+    },
+
+    _ctiCreateParent: function() {
+      if (!this.cti.parent) {
+        return;
+      }
+
+      var set = _.bind(this.set, this);
+      return this.related(this.cti.parent.target).save().then(function(parent) {
+        set('id', parent.get('id'));
+      });
+    }
+  }, {
+    extended: function(child) {
+
+      var proto = child.prototype;
+
+      var cti = proto.cti;
+      if (!cti) {
+        return;
+      }
+
+      var typeAttr = cti.typeAttribute || 'type',
+          childModels = cti.children || [];
+
+      _.defaults(proto, {
+        virtuals: {}
+      });
+
+      _.defaults(cti, {
+        delegate: {}
+      });
+
+      if (cti.parent) {
+        proto[cti.parent.target] = function() {
+          return this.belongsTo(cti.parent.model);
+        };
+
+        if (!_.has(cti.delegate, typeAttr)) {
+          cti.delegate[typeAttr] = cti.parent.target;
+        }
+      }
+
+      _.each(childModels, function(model, target) {
+
+        var modelOptions = _.isObject(model) ? model : { model: model };
+        _.defaults(modelOptions, {
+          foreignKey: 'id'
+        }),
+
+        proto[target] = function() {
+          return this.hasOne(modelOptions.model, modelOptions.foreignKey);
+        };
+      });
+
+      if (cti.delegate) {
+
+        _.each(cti.delegate, function(targets, attr) {
+          if (!_.has(proto.virtuals, attr)) {
+            targets = _.isArray(targets) ? targets : [ targets ];
+
+            proto.virtuals[attr] = {
+              get: function() {
+
+                var related = _.bind(this.related, this);
+
+                var target = _.find(targets, function(target) {
+                  return related(target).get(attr);
+                });
+
+                return target ? this.related(target).get(attr) : undefined;
+              },
+
+              set: function(value) {
+                if (targets.length >= 2) {
+                  throw new Error('Set not supported for multiple delegates');
+                }
+
+                var related = _.bind(this.related, this);
+
+                var target = targets[0];
+
+                return target ? this.related(target).set(attr, value) : undefined;
+              }
+            };
+          }
+        });
+      }
+    }
+  });
 }
