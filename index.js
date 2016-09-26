@@ -204,7 +204,20 @@ function columnAsGeoJson(name) {
 }
 
 function logKnexQueries(query) {
-  console.log(chalk.cyan(query.sql + ' with bindings ' + JSON.stringify(query.bindings)));
+
+  var message = query.sql;
+
+  if (query.bindings) {
+    _.each(query.bindings, function(binding) {
+      message = message.replace(/\?/, binding);
+    });
+  }
+
+  if (!message.match(/;$/)) {
+    message = message + ';';
+  }
+
+  console.log(chalk.cyan(message));
 }
 
 function eagerLoad(records) {
@@ -335,13 +348,43 @@ function ctiPlugin(bookshelf) {
       return base;
     },
 
+    save: function(key, val, options) {
+
+      var attrs;
+
+      // Handle both `"key", value` and `{key: value}` -style arguments.
+      if (key == null || typeof key === "object") {
+        attrs = key || {};
+        options = val || {};
+      } else {
+        (attrs = {})[key] = val;
+        options = options || {};
+      }
+
+      var save = _.bind(proto.save, this);
+
+      if (options._ctiTransaction || (!this.cti.concrete && this.cti.parent)) {
+        return save(attrs, options);
+      }
+
+      return new Promise(function(resolve, reject) {
+        return bookshelf.transaction(function() {
+          var promise = save(attrs, options);
+          promise.then(resolve, reject);
+          return promise;
+        });
+      });
+    },
+
     _ctiCreateParent: function() {
       if (!this.cti.parent) {
         return;
       }
 
       var set = _.bind(this.set, this);
-      return this.related(this.cti.parent.target).save().then(function(parent) {
+      return this.related(this.cti.parent.target).save({}, {
+        _ctiTransaction: true
+      }).then(function(parent) {
         set('id', parent.get('id'));
       });
     }
